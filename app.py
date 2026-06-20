@@ -1,9 +1,9 @@
 import os
 import time
 from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
 
 import requests
-from bs4 import BeautifulSoup
 from flask import Flask, jsonify, make_response
 from flask_cors import CORS
 
@@ -11,84 +11,78 @@ app = Flask(__name__)
 CORS(app)
 
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+
 CACHE = {
     "timestamp": 0,
     "data": None,
     "error": None,
 }
 
-FOREX_FACTORY_URL = "https://www.forexfactory.com/calendar"
+FF_XML_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.xml"
 
 
-def _impact_from_class(classes):
-    text = " ".join(classes or []).lower()
-    if "high" in text:
+def text_of(node, tag):
+    child = node.find(tag)
+    if child is None or child.text is None:
+        return ""
+    return child.text.strip()
+
+
+def normalize_impact(value):
+    value = (value or "").strip()
+    lower = value.lower()
+
+    if "high" in lower:
         return "High"
-    if "medium" in text:
+    if "medium" in lower or "med" in lower:
         return "Medium"
-    if "low" in text:
+    if "low" in lower:
         return "Low"
-    if "holiday" in text:
+    if "holiday" in lower:
         return "Holiday"
-    return ""
+
+    return value
 
 
-def fetch_forex_factory_calendar():
+def fetch_calendar_xml():
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/xml,text/xml,*/*",
     }
 
-    response = requests.get(FOREX_FACTORY_URL, headers=headers, timeout=20)
+    response = requests.get(FF_XML_URL, headers=headers, timeout=20)
     response.raise_for_status()
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    rows = soup.select("tr.calendar__row")
+    root = ET.fromstring(response.content)
 
     events = []
-    current_date = ""
 
-    for row in rows:
-        date_cell = row.select_one(".calendar__date")
-        if date_cell and date_cell.get_text(strip=True):
-            current_date = date_cell.get_text(" ", strip=True)
+    for event in root.findall(".//event"):
+        title = text_of(event, "title")
+        currency = text_of(event, "country")
 
-        time_cell = row.select_one(".calendar__time")
-        currency_cell = row.select_one(".calendar__currency")
-        event_cell = row.select_one(".calendar__event")
-        actual_cell = row.select_one(".calendar__actual")
-        forecast_cell = row.select_one(".calendar__forecast")
-        previous_cell = row.select_one(".calendar__previous")
-        impact_cell = row.select_one(".calendar__impact")
-
-        currency = currency_cell.get_text(" ", strip=True) if currency_cell else ""
-        title = event_cell.get_text(" ", strip=True) if event_cell else ""
-
-        if not currency and not title:
+        if not title and not currency:
             continue
 
-        impact = ""
-        if impact_cell:
-            impact = impact_cell.get("title") or _impact_from_class(impact_cell.get("class"))
-
         events.append({
-            "date": current_date,
-            "time": time_cell.get_text(" ", strip=True) if time_cell else "",
+            "date": text_of(event, "date"),
+            "time": text_of(event, "time"),
             "currency": currency,
-            "impact": impact,
+            "impact": normalize_impact(text_of(event, "impact")),
             "event": title,
-            "actual": actual_cell.get_text(" ", strip=True) if actual_cell else "",
-            "forecast": forecast_cell.get_text(" ", strip=True) if forecast_cell else "",
-            "previous": previous_cell.get_text(" ", strip=True) if previous_cell else "",
+            "actual": text_of(event, "actual"),
+            "forecast": text_of(event, "forecast"),
+            "previous": text_of(event, "previous"),
+            "url": text_of(event, "url"),
         })
 
     return {
-        "source": "Forex Factory",
-        "source_url": FOREX_FACTORY_URL,
+        "status": "ok",
+        "source": "Forex Factory XML",
+        "source_url": FF_XML_URL,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "count": len(events),
         "events": events,
@@ -119,11 +113,13 @@ def calendar():
         return jsonify(data)
 
     try:
-        data = fetch_forex_factory_calendar()
+        data = fetch_calendar_xml()
         data["cached"] = False
+
         CACHE["timestamp"] = now
         CACHE["data"] = data
         CACHE["error"] = None
+
         return jsonify(data)
 
     except Exception as exc:
