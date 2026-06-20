@@ -10,6 +10,7 @@ app = Flask(__name__)
 CORS(app)
 
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+CALENDAR_DAYS = int(os.getenv("CALENDAR_DAYS", "30"))
 FMP_API_KEY = os.getenv("FMP_API_KEY", "").strip()
 
 CACHE = {
@@ -17,8 +18,7 @@ CACHE = {
     "data": None,
 }
 
-FMP_STABLE_URL = "https://financialmodelingprep.com/stable/economic-calendar"
-FMP_LEGACY_URL = "https://financialmodelingprep.com/api/v3/economic_calendar"
+FMP_URL = "https://financialmodelingprep.com/stable/economic-calendar"
 
 COUNTRY_TO_CURRENCY = {
     "united states": "USD",
@@ -76,7 +76,6 @@ def split_date_time(date_value):
     if not raw:
         return "", ""
 
-    # Keep date usable even when provider returns ISO datetime.
     if "T" in raw:
         left, right = raw.split("T", 1)
         return left, right[:5]
@@ -117,18 +116,32 @@ def normalize_event(item):
         "actual": clean(item.get("actual") or item.get("actualValue")),
         "forecast": clean(item.get("forecast") or item.get("estimate") or item.get("consensus")),
         "previous": clean(item.get("previous") or item.get("prior")),
-        "source_raw": item,
     }
 
 
-def request_fmp(url, start_date, end_date):
+def fetch_calendar():
+    if not FMP_API_KEY:
+        raise RuntimeError("Missing FMP_API_KEY environment variable in Render.")
+
+    today = datetime.now(timezone.utc).date()
+    start_date = today.isoformat()
+    end_date = (today + timedelta(days=CALENDAR_DAYS)).isoformat()
+
     params = {
         "from": start_date,
         "to": end_date,
         "apikey": FMP_API_KEY,
     }
 
-    response = requests.get(url, params=params, timeout=20)
+    response = requests.get(FMP_URL, params=params, timeout=20)
+
+    if response.status_code == 401:
+        raise RuntimeError("FMP rejected the API key. Rotate/check FMP_API_KEY in Render.")
+    if response.status_code == 403:
+        raise RuntimeError("FMP returned 403 Forbidden. Your key/plan is not entitled to this stable economic-calendar endpoint, or the key is invalid.")
+    if response.status_code == 429:
+        raise RuntimeError("FMP returned 429 Too Many Requests. Raise CACHE_TTL_SECONDS or wait for the usage limit to reset.")
+
     response.raise_for_status()
 
     data = response.json()
@@ -139,50 +152,31 @@ def request_fmp(url, start_date, end_date):
         if "error" in data:
             raise RuntimeError(str(data["error"]))
         if "data" in data and isinstance(data["data"], list):
-            return data["data"]
-        if "historical" in data and isinstance(data["historical"], list):
-            return data["historical"]
+            data = data["data"]
+        elif "historical" in data and isinstance(data["historical"], list):
+            data = data["historical"]
+        else:
+            data = []
 
-    if isinstance(data, list):
-        return data
+    if not isinstance(data, list):
+        data = []
 
-    return []
+    events = [normalize_event(item) for item in data if isinstance(item, dict)]
 
+    g10_events = [e for e in events if e.get("currency") in G10]
+    final_events = g10_events if g10_events else events
 
-def fetch_calendar():
-    if not FMP_API_KEY:
-        raise RuntimeError("Missing FMP_API_KEY environment variable in Render.")
-
-    today = datetime.now(timezone.utc).date()
-    start_date = today.isoformat()
-    end_date = (today + timedelta(days=30)).isoformat()
-
-    last_error = None
-
-    for url in (FMP_STABLE_URL, FMP_LEGACY_URL):
-        try:
-            raw_events = request_fmp(url, start_date, end_date)
-            events = [normalize_event(item) for item in raw_events if isinstance(item, dict)]
-
-            # Keep G10 FX-relevant events first, but do not destroy data if the provider omits currency.
-            g10_events = [e for e in events if e.get("currency") in G10]
-            final_events = g10_events if g10_events else events
-
-            return {
-                "status": "ok",
-                "source": "Financial Modeling Prep",
-                "source_url": url,
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-                "from": start_date,
-                "to": end_date,
-                "count": len(final_events),
-                "events": final_events,
-            }
-
-        except Exception as exc:
-            last_error = exc
-
-    raise RuntimeError(f"FMP calendar request failed: {last_error}")
+    return {
+        "status": "ok",
+        "source": "Financial Modeling Prep",
+        "source_url": FMP_URL,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "from": start_date,
+        "to": end_date,
+        "calendar_days": CALENDAR_DAYS,
+        "count": len(final_events),
+        "events": final_events,
+    }
 
 
 @app.route("/")
@@ -193,6 +187,7 @@ def home():
         "endpoint": "/calendar",
         "provider": "Financial Modeling Prep",
         "has_api_key": bool(FMP_API_KEY),
+        "calendar_days": CALENDAR_DAYS,
     })
 
 
@@ -213,10 +208,8 @@ def calendar():
     try:
         data = fetch_calendar()
         data["cached"] = False
-
         CACHE["timestamp"] = now
         CACHE["data"] = data
-
         return jsonify(data)
 
     except Exception as exc:
