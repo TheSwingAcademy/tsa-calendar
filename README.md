@@ -1,9 +1,15 @@
-# TSA Calendar Server
+# TSA Calendar Server v3
 
 Flask server for the TSA trading dashboard.
 
-Endpoint:
+Provider: Financial Modeling Prep Economic Calendar API.
 
+## Required Render environment variable
+
+FMP_API_KEY
+
+## Endpoints
+
+- `/`
+- `/health`
 - `/calendar`
-
-This version uses the Forex Factory XML feed instead of scraping the public calendar page.
