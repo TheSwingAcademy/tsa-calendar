@@ -1,22 +1,14 @@
-# TSA Calendar Server v7 Hybrid
+# TSA Calendar Server v8
 
-Hybrid backend for the TSA trading dashboard.
+Free this-week economic calendar backend for the TSA dashboard.
 
-Long-range source:
-- JBlanked Calendar API
-- Date range: today + CALENDAR_DAYS
-- Cache: JBLANKED_CACHE_TTL_SECONDS
-
-Live source:
+Sources:
 - ForexFactory/Faireconomy XML this-week feed
-- Cache: LIVE_CACHE_TTL_SECONDS
+- Investing/ForexPros fallback scraper
 
-Required Render variable:
-JBLANKED_API_KEY
+No API key required.
 
-Recommended Render variables:
-CALENDAR_DAYS=30
-JBLANKED_SOURCE=mql5
-JBLANKED_CACHE_TTL_SECONDS=86400
-LIVE_CACHE_TTL_SECONDS=900
-ENABLE_LIVE_FF=true
+Optional Render environment variables:
+CACHE_TTL_SECONDS=900
+ENABLE_FF_XML=true
+ENABLE_INVESTING_FALLBACK=true
